@@ -4,12 +4,19 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Anant Electrical - Staff Node Portal</title>
+    <!-- Web App Capability for Mobile Browsers -->
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="theme-color" content="#4a148c">
+    
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
-    <!-- Chart.js CDN Added for Data Visualizations -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <!-- Chart.js DataLabels Plugin for amounts on bars -->
     <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2"></script>
+    <!-- jsPDF & AutoTable for PDF Payslip Generation -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.31/jspdf.plugin.autotable.min.js"></script>
+
     <style>
         @keyframes scan-motion {
             0% { transform: translateY(0); }
@@ -51,7 +58,14 @@
             <div class="bg-white rounded-2xl shadow-xl overflow-hidden border border-purple-100">
                 <div class="bg-gradient-to-r from-[#4a148c] to-[#6a1b9a] p-6 text-white flex justify-between items-start">
                     <div>
-                        <span id="display-role-badge" class="inline-block text-[10px] uppercase font-bold tracking-widest bg-purple-950 text-purple-200 px-2 py-0.5 rounded-md mb-2">Worker Portal</span>
+                        <div class="flex items-center gap-2 mb-2">
+                            <span id="display-role-badge" class="inline-block text-[10px] uppercase font-bold tracking-widest bg-purple-950 text-purple-200 px-2 py-0.5 rounded-md">Worker Portal</span>
+                            <!-- Live Network Indicator Badge -->
+                            <div class="flex items-center gap-1.5 bg-purple-950/60 px-2 py-0.5 rounded-full border border-purple-400/30">
+                                <span id="network-dot" class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                                <span id="network-text" class="text-[9px] font-mono uppercase font-bold text-emerald-200">Online</span>
+                            </div>
+                        </div>
                         <h2 id="display-worker-name" class="text-2xl font-black tracking-tight">Loading Profile...</h2>
                         <p id="display-worker-email" class="text-xs text-purple-200/80 font-mono mt-0.5">...</p>
                     </div>
@@ -99,6 +113,11 @@
                         <span id="display-net-payable-label" class="text-xs font-black uppercase tracking-wider">Net Salary Earned:</span>
                         <strong id="display-net-payable" class="text-lg font-black font-mono text-emerald-400">₹0</strong>
                     </div>
+
+                    <!-- PDF Generation Button -->
+                    <button onclick="downloadMonthlyPayslipPDF()" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-3 rounded-xl text-xs uppercase tracking-wider transition shadow-sm flex items-center justify-center gap-2 cursor-pointer mt-2">
+                        📥 Download Payslip & Expense Statement
+                    </button>
                 </div>
 
                 <div class="p-4 bg-gray-50 border-t border-gray-100 flex justify-between items-center text-[11px] text-gray-500 font-mono">
@@ -107,7 +126,7 @@
                 </div>
             </div>
 
-            <!-- Visual Analytics Container for Pie and Bar Chart Elements -->
+            <!-- Visual Analytics Container -->
             <div class="bg-white rounded-2xl shadow-xl p-5 space-y-6 border border-purple-100">
                 <div>
                     <h3 class="text-xs font-black uppercase tracking-wider text-gray-700 flex items-center gap-2">
@@ -117,7 +136,6 @@
                 </div>
                 
                 <div class="space-y-6">
-                    <!-- Pie Chart Layout -->
                     <div class="bg-slate-50/60 p-3 rounded-xl border border-slate-100 flex flex-col items-center">
                         <span class="text-[10px] uppercase font-bold tracking-wider text-slate-500 mb-2 font-mono">Ledger Proportion Split</span>
                         <div class="w-full max-w-[210px] aspect-square">
@@ -125,7 +143,6 @@
                         </div>
                     </div>
                     
-                    <!-- Bar Chart Layout -->
                     <div class="bg-slate-50/60 p-3 rounded-xl border border-slate-100 flex flex-col items-center">
                         <span class="text-[10px] uppercase font-bold tracking-wider text-slate-500 mb-2 font-mono">Volumetric Metrics Flow Comparison</span>
                         <div class="w-full h-52">
@@ -322,7 +339,6 @@
     </footer>
 
     <script>
-        // Register the DataLabels plugin globally for Chart.js
         Chart.register(ChartDataLabels);
 
         const SUPABASE_URL = "https://xeffbclwniepwbpsvorh.supabase.co/rest/v1/";
@@ -344,18 +360,111 @@
         let runtimePieChartInstance = null;
         let runtimeBarChartInstance = null;
 
-        // --- NEW SUPABASE STORAGE & GPS HELPER FUNCTIONS ---
+        // --- INDEXEDDB OFFLINE QUEUE SYSTEM ---
+        function openOfflineDB() {
+            return new Promise((resolve, reject) => {
+                const request = indexedDB.open("AnantOfflineDB", 1);
+                request.onupgradeneeded = (e) => {
+                    const db = e.target.result;
+                    if (!db.objectStoreNames.contains("offline_queue")) {
+                        db.createObjectStore("offline_queue", { keyPath: "id", autoIncrement: true });
+                    }
+                };
+                request.onsuccess = (e) => resolve(e.target.result);
+                request.onerror = (e) => reject(e.target.error);
+            });
+        }
+
+        async function savePunchToOfflineQueue(type, payload, imageBase64) {
+            const db = await openOfflineDB();
+            return new Promise((resolve, reject) => {
+                const tx = db.transaction("offline_queue", "readwrite");
+                const store = tx.objectStore("offline_queue");
+                store.add({ type, payload, imageBase64, timestamp: Date.now() });
+                tx.oncomplete = () => resolve();
+                tx.onerror = (e) => reject(e.target.error);
+            });
+        }
+
+        async function syncOfflineQueue() {
+            if (!navigator.onLine) return;
+
+            try {
+                const db = await openOfflineDB();
+                const tx = db.transaction("offline_queue", "readonly");
+                const store = tx.objectStore("offline_queue");
+                const request = store.getAll();
+
+                request.onsuccess = async () => {
+                    const items = request.result;
+                    if (!items || items.length === 0) return;
+
+                    updateNetworkBadge(true, `Syncing (${items.length})...`);
+
+                    for (const item of items) {
+                        try {
+                            let selfieUrl = null;
+                            if (item.imageBase64) {
+                                const fileName = `${item.type}_${currentActiveUser?.id || 'usr'}_${Date.now()}.jpg`;
+                                selfieUrl = await uploadSelfieToSupabase(item.imageBase64, fileName);
+                            }
+
+                            if (item.type === 'in') {
+                                item.payload.punch_in_image_url = selfieUrl;
+                                await fetch(`${SUPABASE_URL}shift_logs`, { method: 'POST', headers: HEADERS, body: JSON.stringify(item.payload) });
+                            } else if (item.type === 'out') {
+                                item.payload.punch_out_image_url = selfieUrl;
+                                const shiftId = item.payload.shift_id;
+                                const remBal = item.payload.remaining_balance;
+                                delete item.payload.shift_id;
+                                delete item.payload.remaining_balance;
+
+                                await fetch(`${SUPABASE_URL}shift_logs?id=eq.${shiftId}`, { method: 'PATCH', headers: HEADERS, body: JSON.stringify(item.payload) });
+                                await fetch(`${SUPABASE_URL}workers_registry?email=eq.${encodeURIComponent(currentActiveUser.email)}`, { method: 'PATCH', headers: HEADERS, body: JSON.stringify({ morning_advance: remBal }) });
+                            }
+
+                            const deleteTx = db.transaction("offline_queue", "readwrite");
+                            deleteTx.objectStore("offline_queue").delete(item.id);
+                        } catch (err) {
+                            console.error("Failed syncing item:", item, err);
+                        }
+                    }
+
+                    updateNetworkBadge(true, "Online");
+                    alert("📶 Offline shifts synchronized with cloud server!");
+                    await syncDashboardPortalState();
+                };
+            } catch(e) { console.error("Sync error:", e); }
+        }
+
+        function updateNetworkBadge(isOnline, customText) {
+            const dot = document.getElementById('network-dot');
+            const text = document.getElementById('network-text');
+            if (!dot || !text) return;
+
+            if (isOnline) {
+                dot.className = "w-2 h-2 rounded-full bg-emerald-400 animate-pulse";
+                text.innerText = customText || "Online";
+                text.className = "text-[9px] font-mono uppercase font-bold text-emerald-200";
+            } else {
+                dot.className = "w-2 h-2 rounded-full bg-rose-500";
+                text.innerText = "Offline Mode";
+                text.className = "text-[9px] font-mono uppercase font-bold text-rose-300";
+            }
+        }
+
+        window.addEventListener('online', () => { updateNetworkBadge(true); syncOfflineQueue(); });
+        window.addEventListener('offline', () => { updateNetworkBadge(false); });
+
+        // --- SUPABASE STORAGE & GPS HELPERS ---
         function base64ToBlob(base64Data, mimeType = 'image/jpeg') {
             const base64String = base64Data.split(',')[1] || base64Data;
             const byteCharacters = atob(base64String);
             const byteArrays = [];
-            
             for (let offset = 0; offset < byteCharacters.length; offset += 512) {
                 const slice = byteCharacters.slice(offset, offset + 512);
                 const byteNumbers = new Array(slice.length);
-                for (let i = 0; i < slice.length; i++) {
-                    byteNumbers[i] = slice.charCodeAt(i);
-                }
+                for (let i = 0; i < slice.length; i++) byteNumbers[i] = slice.charCodeAt(i);
                 byteArrays.push(new Uint8Array(byteNumbers));
             }
             return new Blob(byteArrays, { type: mimeType });
@@ -368,12 +477,7 @@
 
             const res = await fetch(uploadUrl, {
                 method: 'POST',
-                headers: {
-                    "apikey": SUPABASE_KEY,
-                    "Authorization": `Bearer ${SUPABASE_KEY}`,
-                    "Content-Type": "image/jpeg",
-                    "x-upsert": "true"
-                },
+                headers: { "apikey": SUPABASE_KEY, "Authorization": `Bearer ${SUPABASE_KEY}`, "Content-Type": "image/jpeg", "x-upsert": "true" },
                 body: blob
             });
 
@@ -381,34 +485,155 @@
                 const errData = await res.json();
                 throw new Error(errData.message || "Storage bucket upload failed");
             }
-
             const publicBaseUrl = SUPABASE_URL.replace('/rest/v1/', '/storage/v1/object/public');
             return `${publicBaseUrl}/shift-selfies/${fileName}`;
         }
 
         function fetchCurrentGPSLocation() {
             return new Promise((resolve) => {
-                if (!navigator.geolocation) {
-                    resolve("GPS Not Supported");
-                    return;
-                }
-
+                if (!navigator.geolocation) return resolve("GPS Not Supported");
                 navigator.geolocation.getCurrentPosition(
-                    (position) => {
-                        const lat = position.coords.latitude.toFixed(5);
-                        const lng = position.coords.longitude.toFixed(5);
-                        resolve(`GPS: ${lat}, ${lng}`);
-                    },
-                    (error) => {
-                        console.warn("Geolocation warning:", error.message);
-                        resolve("GPS Access Denied");
-                    },
+                    (p) => resolve(`GPS: ${p.coords.latitude.toFixed(5)}, ${p.coords.longitude.toFixed(5)}`),
+                    (e) => resolve("GPS Access Denied"),
                     { enableHighAccuracy: true, timeout: 8000, maximumAge: 0 }
                 );
             });
         }
-        // ----------------------------------------------------
 
+        // --- MONTHLY PAYSLIP PDF GENERATOR ---
+        async function downloadMonthlyPayslipPDF() {
+            if (!currentActiveUser) return alert("User session not found.");
+
+            const { jsPDF } = window.jspdf;
+            const doc = new jsPDF();
+
+            const monthFilterSelect = document.getElementById('dashboard-month-filter');
+            const selectedMonthVal = monthFilterSelect.value;
+            const selectedMonthName = monthFilterSelect.options[monthFilterSelect.selectedIndex].text;
+            const currentYear = new Date().getFullYear();
+
+            const filteredLogs = activeShiftLogs.filter(log => {
+                if (selectedMonthVal === 'ALL') return true;
+                const dateObj = new Date(log.punch_in_time || log.created_at);
+                return dateObj.getMonth() === parseInt(selectedMonthVal);
+            });
+
+            const approvedShifts = filteredLogs.filter(log => log.status === 'Approved');
+            const approvedDaysCount = approvedShifts.length;
+            const fixedSalaryRate = parseFloat(currentActiveUser.fixed_salary || 0);
+            const grossEarned = approvedDaysCount * fixedSalaryRate;
+
+            let totalTransport = 0, totalFood = 0, totalMaterial = 0, totalMiddayAdvance = 0;
+
+            filteredLogs.forEach(log => {
+                if (log.status === 'Approved' || log.status === 'Pending') {
+                    totalTransport += parseFloat(log.transport_expense || 0);
+                    totalFood += parseFloat(log.food_expense || 0);
+                    totalMaterial += parseFloat(log.material_expense || 0);
+                    totalMiddayAdvance += parseFloat(log.payment_advance_taken || 0);
+                }
+            });
+
+            const totalReimbursements = totalTransport + totalFood + totalMaterial;
+            const salaryAdvanceOutstanding = parseFloat(currentActiveUser.salary_advance_taken || 0);
+            const netPayout = grossEarned + totalReimbursements - totalMiddayAdvance;
+
+            // PDF Banner Header
+            doc.setFillColor(74, 20, 140);
+            doc.rect(0, 0, 210, 38, 'F');
+            doc.setTextColor(255, 255, 255);
+            doc.setFont("helvetica", "bold");
+            doc.setFontSize(20);
+            doc.text("ANANT ELECTRICAL", 14, 18);
+            doc.setFontSize(10);
+            doc.setFont("helvetica", "normal");
+            doc.text("Official Field Operations Payslip & Ledger Statement", 14, 26);
+            doc.text(`Period: ${selectedMonthName} ${currentYear}`, 196, 26, { align: "right" });
+
+            // Employee Summary Table
+            doc.setTextColor(30, 41, 59);
+            doc.autoTable({
+                startY: 45, theme: 'plain', styles: { fontSize: 9, cellPadding: 2 },
+                body: [
+                    [{ content: `Employee Name: ${currentActiveUser.name || 'Worker'}`, styles: { fontStyle: 'bold' } }, { content: `Role: ${currentActiveUser.role || 'Field Associate'}`, styles: { fontStyle: 'bold' } }],
+                    [`Email: ${currentActiveUser.email}`, `Daily Base Rate: Rs. ${fixedSalaryRate.toLocaleString('en-IN')}`],
+                    [`Statement Generated: ${new Date().toLocaleDateString('en-IN')}`, `Status: System Reconciled`]
+                ]
+            });
+
+            // Earnings Table
+            doc.autoTable({
+                startY: doc.lastAutoTable.finalY + 6,
+                head: [['Description / Earning Item', 'Units / Days', 'Amount (INR)']],
+                body: [
+                    ['Earned Shift Days (Approved)', `${approvedDaysCount} Days`, `Rs. ${grossEarned.toLocaleString('en-IN')}`],
+                    ['Transport Reimbursements', '-', `Rs. ${totalTransport.toLocaleString('en-IN')}`],
+                    ['Food & Meal Allowances', '-', `Rs. ${totalFood.toLocaleString('en-IN')}`],
+                    ['Site Material Expenses Claimed', '-', `Rs. ${totalMaterial.toLocaleString('en-IN')}`],
+                    [{ content: 'Total Earnings & Reimbursements', styles: { fontStyle: 'bold' } }, '', { content: `Rs. ${(grossEarned + totalReimbursements).toLocaleString('en-IN')}`, styles: { fontStyle: 'bold' } }]
+                ],
+                headStyles: { fillColor: [74, 20, 140], textColor: [255, 255, 255], fontStyle: 'bold' },
+                alternateRowStyles: { fillColor: [248, 245, 255] }
+            });
+
+            // Deductions Table
+            doc.autoTable({
+                startY: doc.lastAutoTable.finalY + 6,
+                head: [['Deductions & Advance Adjustments', 'Reference / Status', 'Amount (INR)']],
+                body: [
+                    ['Mid-Day Cash Advances Received', 'Rolling Field Wallet', `- Rs. ${totalMiddayAdvance.toLocaleString('en-IN')}`],
+                    ['Structural Salary Advance Outstanding', 'Company Ledger', `Rs. ${salaryAdvanceOutstanding.toLocaleString('en-IN')}`],
+                ],
+                headStyles: { fillColor: [190, 18, 60], textColor: [255, 255, 255], fontStyle: 'bold' },
+                alternateRowStyles: { fillColor: [255, 241, 242] }
+            });
+
+            // Net Payable Callout
+            const finalY = doc.lastAutoTable.finalY + 10;
+            doc.setFillColor(236, 253, 245);
+            doc.setDrawColor(16, 185, 129);
+            doc.roundedRect(14, finalY, 182, 22, 3, 3, 'FD');
+            doc.setFont("helvetica", "bold");
+            doc.setFontSize(11);
+            doc.setTextColor(6, 78, 59);
+            doc.text("NET PAYABLE AMOUNT:", 20, finalY + 14);
+            doc.setFontSize(14);
+            doc.text(`Rs. ${netPayout.toLocaleString('en-IN')}`, 190, finalY + 14, { align: "right" });
+
+            // Shift Activity List
+            doc.setFontSize(10);
+            doc.setFont("helvetica", "bold");
+            doc.setTextColor(74, 20, 140);
+            doc.text("Approved Shift Activity Summary", 14, finalY + 32);
+
+            const shiftRows = approvedShifts.map((s, idx) => [
+                `#${idx + 1}`,
+                new Date(s.punch_in_time || s.created_at).toLocaleDateString('en-IN'),
+                s.site_location || 'Field Site',
+                `Rs. ${parseFloat(s.transport_expense || 0) + parseFloat(s.food_expense || 0) + parseFloat(s.material_expense || 0)}`,
+                s.status
+            ]);
+
+            doc.autoTable({
+                startY: finalY + 36,
+                head: [['#', 'Date', 'Site Location', 'Expenses', 'Status']],
+                body: shiftRows.length > 0 ? shiftRows : [['-', 'No approved shifts recorded for this period', '-', '-', '-']],
+                styles: { fontSize: 8 },
+                headStyles: { fillColor: [100, 116, 139] }
+            });
+
+            // Footer
+            const pageHeight = doc.internal.pageSize.height;
+            doc.setFontSize(8);
+            doc.setTextColor(148, 163, 184);
+            doc.setFont("helvetica", "italic");
+            doc.text("This is a computer-generated document. No manual signature is required.", 14, pageHeight - 12);
+            doc.text("Anant Electrical Staff Management Node", 196, pageHeight - 12, { align: "right" });
+
+            doc.save(`Payslip_${currentActiveUser.name.replace(/\s+/g, '_')}_${selectedMonthName}_${currentYear}.pdf`);
+        }
+
+        // --- AUTH & SHIFT WORKFLOW LOGIC ---
         function getTodayCacheKeyString(type) {
             if(!currentActiveUser) return '';
             const todayStr = new Date().toISOString().split('T')[0];
@@ -419,14 +644,10 @@
             const emailInput = document.getElementById('auth-email').value.trim().toLowerCase();
             const passwordInput = document.getElementById('auth-password').value.trim();
 
-            if(!emailInput || !passwordInput) {
-                return alert("Please enter both email and password.");
-            }
+            if(!emailInput || !passwordInput) return alert("Please enter both email and password.");
 
             try {
-                const res = await fetch(`${SUPABASE_URL}workers_registry?email=eq.${encodeURIComponent(emailInput)}`, { 
-                    method: "GET", headers: HEADERS 
-                });
+                const res = await fetch(`${SUPABASE_URL}workers_registry?email=eq.${encodeURIComponent(emailInput)}`, { method: "GET", headers: HEADERS });
                 if (!res.ok) throw new Error(`Status ${res.status}`);
                 const data = await res.json();
 
@@ -437,61 +658,43 @@
                         document.getElementById('auth-section').classList.add('hidden');
                         document.getElementById('portal-dashboard').classList.remove('hidden');
                         await syncDashboardPortalState();
-                    } else {
-                        alert("Authentication Failure: Password does not match.");
-                    }
-                } else {
-                    alert("Authentication Failure: No account registered under this email.");
-                }
-            } catch(err) {
-                console.error("Auth Error:", err);
-                alert("Network communication error.");
-            }
+                        syncOfflineQueue(); // Auto-sync offline queue on login
+                    } else { alert("Authentication Failure: Password does not match."); }
+                } else { alert("Authentication Failure: No account registered under this email."); }
+            } catch(err) { alert("Network communication error."); }
         }
 
         function runPunchOutLockSystem(startTimeISO) {
             if(lockTimerInterval) clearInterval(lockTimerInterval);
-            
             const punchOutBtn = document.getElementById('punch-out-button');
-            const startTime = new Date(startTimeISO).getTime();
-            const fourHoursInMillis = 4 * 60 * 60 * 1000;
-            const lockUntilTime = startTime + fourHoursInMillis;
+            const lockUntilTime = new Date(startTimeISO).getTime() + (4 * 60 * 60 * 1000);
 
             function updateTimer() {
-                const now = new Date().getTime();
-                const remainingTime = lockUntilTime - now;
-
+                const remainingTime = lockUntilTime - new Date().getTime();
                 if (remainingTime > 0) {
                     punchOutBtn.disabled = true;
-                    punchOutBtn.classList.remove('bg-[#4a148c]', 'hover:bg-[#380e6f]', 'cursor-pointer');
-                    punchOutBtn.classList.add('bg-gray-400', 'cursor-not-allowed');
-                    
+                    punchOutBtn.className = "w-full bg-gray-400 text-white font-bold py-3.5 rounded-xl text-xs uppercase tracking-widest cursor-not-allowed";
                     const hours = Math.floor(remainingTime / (1000 * 60 * 60));
                     const minutes = Math.floor((remainingTime % (1000 * 60 * 60)) / (1000 * 60));
                     punchOutBtn.innerText = `Locked (Min Shift 4 Hrs) — ${hours}h ${minutes}m left`;
                 } else {
                     punchOutBtn.disabled = false;
-                    punchOutBtn.classList.remove('bg-gray-400', 'cursor-not-allowed');
-                    punchOutBtn.classList.add('bg-[#4a148c]', 'hover:bg-[#380e6f]', 'cursor-pointer');
+                    punchOutBtn.className = "w-full bg-[#4a148c] hover:bg-[#380e6f] text-white font-bold py-3.5 rounded-xl text-xs uppercase tracking-widest cursor-pointer shadow-md transition";
                     punchOutBtn.innerText = "Capture Selfie & Punch Out";
                     clearInterval(lockTimerInterval);
                 }
             }
-
             updateTimer();
             lockTimerInterval = setInterval(updateTimer, 30000);
         }
 
         function switchStreamTab(tabName) {
             currentActiveTab = tabName;
-            const tabs = ['shifts', 'midday', 'salary'];
-            tabs.forEach(t => {
+            ['shifts', 'midday', 'salary'].forEach(t => {
                 const btn = document.getElementById(`tab-btn-${t}`);
-                if (t === tabName) {
-                    btn.className = "flex-1 py-2 text-center rounded-lg text-xs font-bold transition cursor-pointer bg-white text-[#4a148c] shadow-sm";
-                } else {
-                    btn.className = "flex-1 py-2 text-center rounded-lg text-xs font-bold transition cursor-pointer text-purple-200 hover:text-white";
-                }
+                btn.className = t === tabName 
+                    ? "flex-1 py-2 text-center rounded-lg text-xs font-bold transition cursor-pointer bg-white text-[#4a148c] shadow-sm"
+                    : "flex-1 py-2 text-center rounded-lg text-xs font-bold transition cursor-pointer text-purple-200 hover:text-white";
             });
             renderActiveStreamTab();
         }
@@ -502,8 +705,7 @@
             const selectedMonthFilter = document.getElementById('dashboard-month-filter').value;
             const filteredShiftLogs = activeShiftLogs.filter(log => {
                 if (selectedMonthFilter === 'ALL') return true;
-                const dateObj = new Date(log.punch_in_time || log.created_at);
-                return dateObj.getMonth() === parseInt(selectedMonthFilter);
+                return new Date(log.punch_in_time || log.created_at).getMonth() === parseInt(selectedMonthFilter);
             });
 
             if (currentActiveTab === 'shifts') {
@@ -535,9 +737,7 @@
                         `;
                         stream.appendChild(div);
                     });
-                } else {
-                    stream.innerHTML = `<p class="text-xs text-purple-200 italic text-center py-4">No shift logs found for this selection.</p>`;
-                }
+                } else { stream.innerHTML = `<p class="text-xs text-purple-200 italic text-center py-4">No shift logs found for this selection.</p>`; }
             } else if (currentActiveTab === 'midday') {
                 const recordsWithAdvances = filteredShiftLogs.filter(log => parseFloat(log.payment_advance_taken || 0) > 0 && log.status !== 'Active');
                 const morningWalletAmt = parseFloat(currentActiveUser.morning_advance || 0);
@@ -549,7 +749,6 @@
                         div.innerHTML = `<div><p class="font-bold text-amber-900">☀️ Morning Cash (Opening Balance)</p><p class="text-[10px] text-slate-400">Admin Allocated Fund Balance</p></div><strong class="text-amber-600 font-mono font-black text-sm">₹${morningWalletAmt.toLocaleString('en-IN')}</strong>`;
                         stream.appendChild(div);
                     }
-                    
                     recordsWithAdvances.forEach(log => {
                         let dateText = new Date(log.punch_in_time || log.created_at).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
                         let div = document.createElement('div');
@@ -557,9 +756,7 @@
                         div.innerHTML = `<div><p class="font-bold text-amber-900">Mid-Day Advance Received</p><p class="text-[10px] text-slate-400">${dateText} • ${log.site_location || 'On-Site entry'}</p></div><strong class="text-amber-600 font-mono font-black text-sm">+ ₹${parseFloat(log.payment_advance_taken).toLocaleString('en-IN')}</strong>`;
                         stream.appendChild(div);
                     });
-                } else {
-                    stream.innerHTML = `<p class="text-xs text-purple-200 italic text-center py-4">No Mid-Day advances logged in this month range.</p>`;
-                }
+                } else { stream.innerHTML = `<p class="text-xs text-purple-200 italic text-center py-4">No Mid-Day advances logged in this month range.</p>`; }
             } else if (currentActiveTab === 'salary') {
                 const salaryAdvance = parseFloat(currentActiveUser.salary_advance_taken || 0);
                 if (salaryAdvance > 0) {
@@ -573,34 +770,29 @@
                                 <p class="font-bold text-rose-900">Active Structural Salary Advance Balance</p>
                                 <strong class="text-rose-600 font-mono text-sm">₹${salaryAdvance.toLocaleString('en-IN')}</strong>
                             </div>
-                            <p class="text-[10px] text-gray-500 leading-relaxed">This ledger tracks long-term lump sum structural advances provided directly via central accounts. Monthly auto-deductions adjust against confirmed net payroll milestones.</p>
+                            <p class="text-[10px] text-gray-500 leading-relaxed">This ledger tracks long-term lump sum structural advances provided directly via central accounts.</p>
                             <div class="pt-2 border-t border-slate-100 flex justify-between text-[9px] text-slate-400 font-mono uppercase">
                                 <span>Verified: ${verifiedTimestamp}</span>
                                 <span>Ref: AE-STF-${currentActiveUser.id || 'REG'}</span>
                             </div>
                         </div>`;
-                } else {
-                    stream.innerHTML = `<p class="text-xs text-purple-200 italic text-center py-4">No long-term outstanding salary advance balances found.</p>`;
-                }
+                } else { stream.innerHTML = `<p class="text-xs text-purple-200 italic text-center py-4">No long-term outstanding salary advance balances found.</p>`; }
             }
         }
 
         async function syncDashboardPortalState() {
             const monthFilter = document.getElementById('dashboard-month-filter');
             if (!sessionStorage.getItem('manualMonthSet')) {
-                const currentMonth = new Date().getMonth();
-                monthFilter.value = currentMonth.toString();
+                monthFilter.value = new Date().getMonth().toString();
             }
 
             if(!currentActiveUser) return;
 
             try {
-                const userRes = await fetch(`${SUPABASE_URL}workers_registry?email=eq.${encodeURIComponent(currentActiveUser.email)}`, { 
-                    method: "GET", headers: HEADERS 
-                });
+                const userRes = await fetch(`${SUPABASE_URL}workers_registry?email=eq.${encodeURIComponent(currentActiveUser.email)}`, { method: "GET", headers: HEADERS });
                 const userData = await userRes.json();
                 if(userData && userData.length > 0) currentActiveUser = userData[0];
-            } catch(e) { console.error("Error updating details:", e); }
+            } catch(e) { console.error("Error updating user details:", e); }
 
             document.getElementById('display-worker-name').innerText = currentActiveUser.name || "Worker";
             document.getElementById('display-worker-email').innerText = currentActiveUser.email;
@@ -608,9 +800,7 @@
             document.getElementById('display-fixed-salary').innerText = `₹${parseFloat(currentActiveUser.fixed_salary || 0).toLocaleString('en-IN')}`;
 
             try {
-                const res = await fetch(`${SUPABASE_URL}shift_logs?worker_email=eq.${encodeURIComponent(currentActiveUser.email)}&order=created_at.desc`, { 
-                    method: "GET", headers: HEADERS 
-                });
+                const res = await fetch(`${SUPABASE_URL}shift_logs?worker_email=eq.${encodeURIComponent(currentActiveUser.email)}&order=created_at.desc`, { method: "GET", headers: HEADERS });
                 activeShiftLogs = await res.json();
                 runningActiveShift = activeShiftLogs.find(log => log.status === 'Active');
 
@@ -620,10 +810,7 @@
                     let startTimeISO = runningActiveShift.punch_in_time || runningActiveShift.created_at;
                     let startTime = new Date(startTimeISO);
                     
-                    let dateStr = startTime.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
-                    let timeStr = startTime.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
-                    
-                    document.getElementById('punch-in-time-display').innerText = `Started: ${dateStr} at ${timeStr}`;
+                    document.getElementById('punch-in-time-display').innerText = `Started: ${startTime.toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })} at ${startTime.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}`;
                     
                     let storedSelfies = JSON.parse(localStorage.getItem(`selfies_${runningActiveShift.id}`)) || {};
                     let activeImg = runningActiveShift.punch_in_image_url || storedSelfies.in;
@@ -631,9 +818,7 @@
                     if(activeImg) {
                         document.getElementById('active-selfie-box').classList.remove('hidden');
                         document.getElementById('active-selfie-image').src = activeImg;
-                    } else {
-                        document.getElementById('active-selfie-box').classList.add('hidden');
-                    }
+                    } else { document.getElementById('active-selfie-box').classList.add('hidden'); }
                     runPunchOutLockSystem(startTimeISO);
                 } else {
                     document.getElementById('punch-in-panel').classList.remove('hidden');
@@ -644,15 +829,13 @@
                 const selectedMonthFilter = document.getElementById('dashboard-month-filter').value;
                 const filteredShiftLogs = activeShiftLogs.filter(log => {
                     if (selectedMonthFilter === 'ALL') return true;
-                    const dateObj = new Date(log.punch_in_time || log.created_at);
-                    return dateObj.getMonth() === parseInt(selectedMonthFilter);
+                    return new Date(log.punch_in_time || log.created_at).getMonth() === parseInt(selectedMonthFilter);
                 });
 
                 const monthlyApprovedCount = filteredShiftLogs.filter(log => log.status === 'Approved').length;
                 const monthlyNetSalary = monthlyApprovedCount * parseFloat(currentActiveUser.fixed_salary || 0);
 
-                const allTimeApprovedShifts = activeShiftLogs.filter(log => log.status === 'Approved');
-                const allTimeApprovedCount = allTimeApprovedShifts.length;
+                const allTimeApprovedCount = activeShiftLogs.filter(log => log.status === 'Approved').length;
                 const allTimeGrossEarned = allTimeApprovedCount * parseFloat(currentActiveUser.fixed_salary || 0);
 
                 document.getElementById('display-approved-days').innerText = `${monthlyApprovedCount} Days`;
@@ -660,19 +843,14 @@
                 document.getElementById('display-net-payable').innerText = `₹${monthlyNetSalary.toLocaleString('en-IN')}`;
 
                 const selectedMonthText = monthFilter.options[monthFilter.selectedIndex].text;
-                if (selectedMonthFilter === 'ALL') {
-                    document.getElementById('display-net-payable-label').innerText = "TOTAL LIFETIME EARNED:";
-                } else {
-                    document.getElementById('display-net-payable-label').innerText = `${selectedMonthText.toUpperCase()} EARNED:`;
-                }
+                document.getElementById('display-net-payable-label').innerText = selectedMonthFilter === 'ALL' ? "TOTAL LIFETIME EARNED:" : `${selectedMonthText.toUpperCase()} EARNED:`;
 
                 const walletBalance = currentActiveUser.morning_advance ? parseFloat(currentActiveUser.morning_advance) : 0;
                 document.getElementById('display-salary-advance').innerText = `₹${walletBalance.toLocaleString('en-IN')}`;
                 const majorAdvanceTaken = currentActiveUser.salary_advance_taken ? parseFloat(currentActiveUser.salary_advance_taken) : 0;
                 document.getElementById('display-salary-advance-taken').innerText = `₹${majorAdvanceTaken.toLocaleString('en-IN')}`;
 
-                let siteSpent = 0;
-                let middayAdvance = 0;
+                let siteSpent = 0, middayAdvance = 0;
                 filteredShiftLogs.forEach(log => {
                     if (log.status === 'Approved' || log.status === 'Pending') {
                         siteSpent += (parseFloat(log.transport_expense || 0) + parseFloat(log.food_expense || 0) + parseFloat(log.material_expense || 0));
@@ -681,7 +859,6 @@
                 });
                 
                 const combinedTotalAdvances = middayAdvance + walletBalance;
-
                 document.getElementById('display-total-spent').innerText = `₹${siteSpent.toLocaleString('en-IN')}`;
                 document.getElementById('display-midday-advance').innerText = `₹${combinedTotalAdvances.toLocaleString('en-IN')}`;
                 
@@ -690,82 +867,20 @@
                 const chartColorsPalette = ['#4a148c', '#10b981', '#3b82f6', '#f59e0b', '#f43f5e'];
 
                 if (runtimePieChartInstance) runtimePieChartInstance.destroy();
-                const ctxPie = document.getElementById('dashboardPieChartCanvas').getContext('2d');
-                runtimePieChartInstance = new Chart(ctxPie, {
+                runtimePieChartInstance = new Chart(document.getElementById('dashboardPieChartCanvas').getContext('2d'), {
                     type: 'pie',
-                    data: {
-                        labels: chartLabels,
-                        datasets: [{
-                            data: chartValues,
-                            backgroundColor: chartColorsPalette,
-                            borderWidth: 1.5,
-                            borderColor: '#ffffff'
-                        }]
-                    },
-                    options: {
-                        responsive: true,
-                        maintainAspectRatio: false,
-                        plugins: {
-                            datalabels: { display: false },
-                            legend: {
-                                position: 'bottom',
-                                labels: { boxWidth: 10, font: { size: 9, family: 'monospace' }, color: '#4b5563' }
-                            },
-                            tooltip: { callbacks: { label: (ctx) => ` ₹${ctx.raw.toLocaleString('en-IN')}` } }
-                        }
-                    }
+                    data: { labels: chartLabels, datasets: [{ data: chartValues, backgroundColor: chartColorsPalette, borderWidth: 1.5, borderColor: '#ffffff' }] },
+                    options: { responsive: true, maintainAspectRatio: false, plugins: { datalabels: { display: false }, legend: { position: 'bottom', labels: { boxWidth: 10, font: { size: 9, family: 'monospace' }, color: '#4b5563' } } } }
                 });
 
                 if (runtimeBarChartInstance) runtimeBarChartInstance.destroy();
-                const ctxBar = document.getElementById('dashboardBarChartCanvas').getContext('2d');
-                runtimeBarChartInstance = new Chart(ctxBar, {
+                runtimeBarChartInstance = new Chart(document.getElementById('dashboardBarChartCanvas').getContext('2d'), {
                     type: 'bar',
-                    data: {
-                        labels: chartLabels,
-                        datasets: [{
-                            label: 'Amount (₹)',
-                            data: chartValues,
-                            backgroundColor: chartColorsPalette,
-                            borderWidth: 1,
-                            borderColor: '#ffffff'
-                        }]
-                    },
+                    data: { labels: chartLabels, datasets: [{ label: 'Amount (₹)', data: chartValues, backgroundColor: chartColorsPalette, borderWidth: 1, borderColor: '#ffffff' }] },
                     options: {
-                        responsive: true,
-                        maintainAspectRatio: false,
-                        layout: {
-                            padding: { top: 25 }
-                        },
-                        scales: {
-                            y: { 
-                                beginAtZero: true, 
-                                grid: { color: '#e5e7eb' }, 
-                                ticks: { font: { size: 8, family: 'monospace' } } 
-                            },
-                            x: { 
-                                grid: { display: false }, 
-                                ticks: { font: { size: 9, fontStyle: 'bold' } } 
-                            }
-                        },
-                        plugins: {
-                            legend: { display: false },
-                            datalabels: {
-                                anchor: 'end',
-                                align: 'top',
-                                font: { weight: 'bold', size: 10, family: 'monospace' },
-                                color: '#374151',
-                                formatter: function(value, context) {
-                                    if(value === 0) return '';
-                                    return '₹' + value.toLocaleString('en-IN');
-                                }
-                            },
-                            tooltip: {
-                                callbacks: {
-                                    title: (ctx) => chartLabels[ctx[0].dataIndex],
-                                    label: (ctx) => ` Value: ₹${ctx.raw.toLocaleString('en-IN')}`
-                                }
-                            }
-                        }
+                        responsive: true, maintainAspectRatio: false, layout: { padding: { top: 25 } },
+                        scales: { y: { beginAtZero: true, grid: { color: '#e5e7eb' }, ticks: { font: { size: 8, family: 'monospace' } } }, x: { grid: { display: false }, ticks: { font: { size: 9, fontStyle: 'bold' } } } },
+                        plugins: { legend: { display: false }, datalabels: { anchor: 'end', align: 'top', font: { weight: 'bold', size: 10, family: 'monospace' }, color: '#374151', formatter: v => v === 0 ? '' : '₹' + v.toLocaleString('en-IN') } }
                     }
                 });
 
@@ -777,14 +892,11 @@
         function checkDailyBillCache(type, inputAmount) {
             const cacheKey = getTodayCacheKeyString(type);
             if(!cacheKey) return false;
-            
             const cachedData = localStorage.getItem(cacheKey);
             if(cachedData) {
                 try {
                     const parsed = JSON.parse(cachedData);
-                    if(parsed && parsed.verified === true && parseFloat(parsed.amount) === parseFloat(inputAmount)) {
-                        return true; 
-                    }
+                    return parsed && parsed.verified === true && parseFloat(parsed.amount) === parseFloat(inputAmount);
                 } catch(e) { return false; }
             }
             return false;
@@ -796,78 +908,31 @@
             const materialAmt = parseFloat(document.getElementById('exp-material').value) || 0;
 
             const section = document.getElementById('bill-verification-section');
-            const reqTransport = document.getElementById('bill-req-transport');
-            const reqFood = document.getElementById('bill-req-food');
-            const reqMaterial = document.getElementById('bill-req-material');
-
             let anyExpenseActive = false;
 
-            if (transportAmt > 0) {
-                reqTransport.classList.remove('hidden');
-                anyExpenseActive = true;
-                if(checkDailyBillCache('transport', transportAmt)) {
-                    billsVerificationResults.transport = true;
-                    document.getElementById('badge-status-transport').className = "text-[9px] font-bold font-mono px-1.5 py-0.5 rounded bg-emerald-600 text-white uppercase tracking-wider";
-                    document.getElementById('badge-status-transport').innerText = "Daily Cache Lock Verified";
-                    document.getElementById('action-block-transport').classList.add('hidden');
-                } else {
-                    document.getElementById('action-block-transport').classList.remove('hidden');
-                    if(!billsVerificationResults.transport) {
-                        renderBillPreviews('transport');
+            [['transport', transportAmt], ['food', foodAmt], ['material', materialAmt]].forEach(([type, amt]) => {
+                const reqEl = document.getElementById(`bill-req-${type}`);
+                if (amt > 0) {
+                    reqEl.classList.remove('hidden');
+                    anyExpenseActive = true;
+                    if(checkDailyBillCache(type, amt)) {
+                        billsVerificationResults[type] = true;
+                        document.getElementById(`badge-status-${type}`).className = "text-[9px] font-bold font-mono px-1.5 py-0.5 rounded bg-emerald-600 text-white uppercase tracking-wider";
+                        document.getElementById(`badge-status-${type}`).innerText = "Daily Cache Lock Verified";
+                        document.getElementById(`action-block-${type}`).classList.add('hidden');
+                    } else {
+                        document.getElementById(`action-block-${type}`).classList.remove('hidden');
+                        if(!billsVerificationResults[type]) renderBillPreviews(type);
                     }
-                }
-            } else {
-                reqTransport.classList.add('hidden');
-                capturedBillImages.transport = [];
-                billsVerificationResults.transport = false;
-            }
-
-            if (foodAmt > 0) {
-                reqFood.classList.remove('hidden');
-                anyExpenseActive = true;
-                if(checkDailyBillCache('food', foodAmt)) {
-                    billsVerificationResults.food = true;
-                    document.getElementById('badge-status-food').className = "text-[9px] font-bold font-mono px-1.5 py-0.5 rounded bg-emerald-600 text-white uppercase tracking-wider";
-                    document.getElementById('badge-status-food').innerText = "Daily Cache Lock Verified";
-                    document.getElementById('action-block-food').classList.add('hidden');
                 } else {
-                    document.getElementById('action-block-food').classList.remove('hidden');
-                    if(!billsVerificationResults.food) {
-                        renderBillPreviews('food');
-                    }
+                    reqEl.classList.add('hidden');
+                    capturedBillImages[type] = [];
+                    billsVerificationResults[type] = false;
                 }
-            } else {
-                reqFood.classList.add('hidden');
-                capturedBillImages.food = [];
-                billsVerificationResults.food = false;
-            }
+            });
 
-            if (materialAmt > 0) {
-                reqMaterial.classList.remove('hidden');
-                anyExpenseActive = true;
-                if(checkDailyBillCache('material', materialAmt)) {
-                    billsVerificationResults.material = true;
-                    document.getElementById('badge-status-material').className = "text-[9px] font-bold font-mono px-1.5 py-0.5 rounded bg-emerald-600 text-white uppercase tracking-wider";
-                    document.getElementById('badge-status-material').innerText = "Daily Cache Lock Verified";
-                    document.getElementById('action-block-material').classList.add('hidden');
-                } else {
-                    document.getElementById('action-block-material').classList.remove('hidden');
-                    if(!billsVerificationResults.material) {
-                        renderBillPreviews('material');
-                    }
-                }
-            } else {
-                reqMaterial.classList.add('hidden');
-                capturedBillImages.material = [];
-                billsVerificationResults.material = false;
-            }
-
-            if (anyExpenseActive) {
-                section.classList.remove('hidden');
-            } else {
-                section.classList.add('hidden');
-                resetBillsVerificationState();
-            }
+            if (anyExpenseActive) section.classList.remove('hidden');
+            else { section.classList.add('hidden'); resetBillsVerificationState(); }
         }
 
         function handleBillFileSelected(type) {
@@ -879,10 +944,7 @@
                     reader.onload = function(e) {
                         capturedBillImages[type].push(e.target.result);
                         filesProcessed++;
-                        if (filesProcessed === input.files.length) {
-                            renderBillPreviews(type);
-                            input.value = ''; 
-                        }
+                        if (filesProcessed === input.files.length) { renderBillPreviews(type); input.value = ''; }
                     };
                     reader.readAsDataURL(file);
                 });
@@ -910,7 +972,7 @@
                 
                 capturedBillImages[type].forEach((imgData, index) => {
                     const thumbWrapper = document.createElement('div');
-                    thumbWrapper.className = "relative w-16 h-16 bg-slate-100 rounded-lg overflow-hidden border border-slate-200 flex-shrink-0 group shadow-sm";
+                    thumbWrapper.className = "relative w-16 h-16 bg-slate-100 rounded-lg overflow-hidden border border-slate-200 flex-shrink-0 shadow-sm";
                     thumbWrapper.innerHTML = `
                         <img src="${imgData}" class="w-full h-full object-cover">
                         <button type="button" onclick="removeBillImage('${type}', ${index})" class="absolute top-0 right-0 bg-rose-600 hover:bg-rose-700 text-white font-bold w-4 h-4 flex items-center justify-center text-[9px] rounded-bl shadow-md cursor-pointer transition">&times;</button>
@@ -938,10 +1000,6 @@
         }
 
         async function verifyExpensesBillsWithAI() {
-            const transportAmt = parseFloat(document.getElementById('exp-transport').value) || 0;
-            const foodAmt = parseFloat(document.getElementById('exp-food').value) || 0;
-            const materialAmt = parseFloat(document.getElementById('exp-material').value) || 0;
-
             const statusDiv = document.getElementById('bills-verification-status');
             statusDiv.className = "text-[10px] font-mono text-left bg-slate-900 text-cyan-400 p-3.5 rounded-xl border border-slate-800 space-y-1 block mt-3 max-h-48 overflow-y-auto";
             statusDiv.innerHTML = "🤖 [Core] Booting Document Vision Neural Parser...";
@@ -952,18 +1010,12 @@
             const y = today.getFullYear().toString(); 
             const mShort = today.toLocaleString('default', { month: 'short' }).toLowerCase(); 
 
-            const dateVariations = [
-                `${d}/${m}`, `${d}-${m}`, 
-                `${d}/${m.padStart(2, '0')}`, `${d}-${m.padStart(2, '0')}`, 
-                `${d}/${m}/${y}`, `${d}-${m}-${y}`,
-                `${d}/${m.padStart(2, '0')}/${y}`, `${d}-${m.padStart(2, '0')}-${y}`,
-                `${d} ${mShort}`, `${d}${mShort}`, `${d}${mShort}${y}`
-            ];
+            const dateVariations = [`${d}/${m}`, `${d}-${m}`, `${d}/${m.padStart(2, '0')}`, `${d}-${m.padStart(2, '0')}`, `${d}/${m}/${y}`, `${d}-${m}-${y}`];
 
             let tasks = [
-                { type: 'transport', amt: transportAmt, title: 'Transport' },
-                { type: 'food', amt: foodAmt, title: 'Food' },
-                { type: 'material', amt: materialAmt, title: 'Material' }
+                { type: 'transport', amt: parseFloat(document.getElementById('exp-transport').value) || 0, title: 'Transport' },
+                { type: 'food', amt: parseFloat(document.getElementById('exp-food').value) || 0, title: 'Food' },
+                { type: 'material', amt: parseFloat(document.getElementById('exp-material').value) || 0, title: 'Material' }
             ].filter(t => t.amt > 0);
 
             for (let task of tasks) {
@@ -977,21 +1029,14 @@
                 let isTodayDate = dateVariations.some(v => cleanRaw.includes(v.replace(/[\s,]/g, '')));
                 
                 if (!isTodayDate) {
-                    const structuralSignatures = [
-                        'invoice', 'bill', 'gst', 'tax', 'sales', 'total', 'amt', 
-                        'rupees', 'phonepe', 'gpay', 'upi', 'paytm', 'transfer', 'success'
-                    ];
-                    const containsSignature = structuralSignatures.some(sig => aggregatedRawText.includes(sig));
-                    const softDayMatch = aggregatedRawText.includes(d) || cleanRaw.includes(d);
-                    const softMonthMatch = aggregatedRawText.includes(mShort) || aggregatedRawText.includes(m);
-
-                    if (containsSignature && (softDayMatch || softMonthMatch)) {
+                    const structuralSignatures = ['invoice', 'bill', 'gst', 'tax', 'sales', 'total', 'amt', 'rupees', 'phonepe', 'gpay', 'upi', 'paytm', 'transfer', 'success'];
+                    if (structuralSignatures.some(sig => aggregatedRawText.includes(sig)) && (aggregatedRawText.includes(d) || cleanRaw.includes(d))) {
                         isTodayDate = true; 
                     }
                 }
 
                 if (!isTodayDate) {
-                    statusDiv.innerHTML += `<br>❌ [Date Rejected] ${task.title}. AI Read: "${aggregatedRawText.substring(0, 50)}...". Please ensure bill is from today.`;
+                    statusDiv.innerHTML += `<br>❌ [Date Rejected] ${task.title}. Ensure receipt is from today.`;
                     continue;
                 }
 
@@ -1010,25 +1055,12 @@
                 const site_location = document.getElementById('shift-location').value.trim();
                 const progress_notes = document.getElementById('shift-progress').value.trim();
                 if(!site_location || !progress_notes) return alert("Validation Failed: Core input fields are empty.");
-                
-                const transportAmt = parseFloat(document.getElementById('exp-transport').value) || 0;
-                const foodAmt = parseFloat(document.getElementById('exp-food').value) || 0;
-                const materialAmt = parseFloat(document.getElementById('exp-material').value) || 0;
-
-                let transportOk = transportAmt > 0 ? (billsVerificationResults.transport || checkDailyBillCache('transport', transportAmt)) : true;
-                let foodOk = foodAmt > 0 ? (billsVerificationResults.food || checkDailyBillCache('food', foodAmt)) : true;
-                let materialOk = materialAmt > 0 ? (billsVerificationResults.material || checkDailyBillCache('material', materialAmt)) : true;
-
-                if (!transportOk || !foodOk || !materialOk) return alert("⚠️ Action Blocked: Complete active layout AI verification scans first.");
             }
 
             document.getElementById('camera-modal').classList.remove('hidden');
             
-            if (mode === 'in') {
-                document.getElementById('camera-title').innerText = "Punch In Identity Selfie";
-                laser.classList.add('hidden');
-            } else if (mode === 'out') {
-                document.getElementById('camera-title').innerText = "Punch Out Identity Selfie";
+            if (mode === 'in' || mode === 'out') {
+                document.getElementById('camera-title').innerText = `${mode === 'in' ? 'Punch In' : 'Punch Out'} Identity Selfie`;
                 laser.classList.add('hidden');
             } else {
                 document.getElementById('camera-title').innerText = `AI Scan: ${mode.toUpperCase()} Proof`;
@@ -1076,67 +1108,55 @@
             if(mediaStream) { mediaStream.getTracks().forEach(track => track.stop()); mediaStream = null; }
         }
 
-        // --- UPDATED WORKFLOW EXECUTION FUNCTIONS ---
+        // --- NETWORK-RESILIENT PUNCH-IN WORKFLOW ---
         async function executePunchInWorkflow() {
-            try {
-                const gpsCoords = await fetchCurrentGPSLocation();
-                let selfieUrl = null;
+            const gpsCoords = await fetchCurrentGPSLocation();
+            const payload = { 
+                worker_email: currentActiveUser.email, 
+                status: "Active", 
+                punch_in_time: new Date().toISOString(), 
+                site_location: gpsCoords, 
+                progress_notes: "", 
+                transport_expense: 0, food_expense: 0, material_expense: 0, payment_advance_taken: 0,
+                punch_in_image_url: null
+            };
 
+            // Offline Fallback
+            if (!navigator.onLine) {
+                await savePunchToOfflineQueue('in', payload, temporaryCapturedBase64);
+                alert("📶 Device Offline: Shift Punch-In saved locally to phone! It will auto-sync once internet returns.");
+                temporaryCapturedBase64 = null;
+                updateNetworkBadge(false);
+                return;
+            }
+
+            // Online Processing
+            try {
+                let selfieUrl = null;
                 if (temporaryCapturedBase64) {
                     const fileName = `in_${currentActiveUser.id || 'usr'}_${Date.now()}.jpg`;
                     selfieUrl = await uploadSelfieToSupabase(temporaryCapturedBase64, fileName);
                 }
+                payload.punch_in_image_url = selfieUrl;
 
-                const payload = { 
-                    worker_email: currentActiveUser.email, 
-                    status: "Active", 
-                    punch_in_time: new Date().toISOString(), 
-                    site_location: gpsCoords, 
-                    progress_notes: "", 
-                    transport_expense: 0, 
-                    food_expense: 0, 
-                    material_expense: 0, 
-                    payment_advance_taken: 0,
-                    punch_in_image_url: selfieUrl
-                };
-
-                const res = await fetch(`${SUPABASE_URL}shift_logs`, { 
-                    method: 'POST', 
-                    headers: HEADERS, 
-                    body: JSON.stringify(payload) 
-                });
-                const data = await res.json();
-
-                if (data && data.length > 0 && selfieUrl) {
-                    let logId = data[0].id;
-                    let record = { in: selfieUrl, out: null };
-                    localStorage.setItem(`selfies_${logId}`, JSON.stringify(record));
-                }
-
+                await fetch(`${SUPABASE_URL}shift_logs`, { method: 'POST', headers: HEADERS, body: JSON.stringify(payload) });
                 alert("Shift started! GPS & Selfie saved to cloud.");
                 temporaryCapturedBase64 = null;
                 await syncDashboardPortalState();
             } catch(err) { 
-                console.error("Punch-In Error:", err);
-                alert("Network error logging punch-in: " + err.message); 
+                await savePunchToOfflineQueue('in', payload, temporaryCapturedBase64);
+                alert("Network Timeout: Punch-In queued locally.");
+                temporaryCapturedBase64 = null;
             }
         }
 
+        // --- NETWORK-RESILIENT PUNCH-OUT WORKFLOW ---
         async function executePunchOutWorkflow() {
             if (!runningActiveShift) return;
 
             const transport_expense = parseFloat(document.getElementById('exp-transport').value) || 0;
             const food_expense = parseFloat(document.getElementById('exp-food').value) || 0;
             const material_expense = parseFloat(document.getElementById('exp-material').value) || 0;
-
-            let transportOk = transport_expense > 0 ? (billsVerificationResults.transport || checkDailyBillCache('transport', transport_expense)) : true;
-            let foodOk = food_expense > 0 ? (billsVerificationResults.food || checkDailyBillCache('food', food_expense)) : true;
-            let materialOk = material_expense > 0 ? (billsVerificationResults.material || checkDailyBillCache('material', material_expense)) : true;
-
-            if (!transportOk || !foodOk || !materialOk) {
-                return alert("⚠️ Error: Unverified or rejected claims detected inside active workflow values.");
-            }
-
             let manualLocation = document.getElementById('shift-location').value.trim();
             const gpsCoords = await fetchCurrentGPSLocation();
             
@@ -1147,58 +1167,48 @@
             const totalShiftExpenses = transport_expense + food_expense + material_expense;
             const currentWallet = parseFloat(currentActiveUser.morning_advance || 0);
             const remainingCarryforwardBalance = currentWallet + payment_advance_taken - totalShiftExpenses;
-            
+
+            const shiftPayload = { 
+                shift_id: runningActiveShift.id,
+                site_location, progress_notes, transport_expense, food_expense, material_expense, material_notes, 
+                payment_advance_taken, remaining_balance: remainingCarryforwardBalance, status: "Pending", 
+                punch_out_time: new Date().toISOString(), punch_out_image_url: null
+            };
+
+            // Offline Fallback
+            if (!navigator.onLine) {
+                await savePunchToOfflineQueue('out', shiftPayload, temporaryCapturedBase64);
+                alert("📶 Device Offline: Shift Punch-Out queued locally! Will sync automatically when network returns.");
+                temporaryCapturedBase64 = null;
+                updateNetworkBadge(false);
+                return;
+            }
+
+            // Online Processing
             try {
                 let selfieUrl = null;
                 if (temporaryCapturedBase64) {
                     const fileName = `out_${currentActiveUser.id || 'usr'}_${Date.now()}.jpg`;
                     selfieUrl = await uploadSelfieToSupabase(temporaryCapturedBase64, fileName);
                 }
+                shiftPayload.punch_out_image_url = selfieUrl;
 
-                const shiftPayload = { 
-                    site_location, 
-                    progress_notes, 
-                    transport_expense, 
-                    food_expense, 
-                    material_expense, 
-                    material_notes, 
-                    payment_advance_taken, 
-                    status: "Pending", 
-                    punch_out_time: new Date().toISOString(),
-                    punch_out_image_url: selfieUrl
-                };
+                const shiftId = shiftPayload.shift_id;
+                delete shiftPayload.shift_id;
+                delete shiftPayload.remaining_balance;
 
-                await fetch(`${SUPABASE_URL}shift_logs?id=eq.${runningActiveShift.id}`, { method: 'PATCH', headers: HEADERS, body: JSON.stringify(shiftPayload) });
+                await fetch(`${SUPABASE_URL}shift_logs?id=eq.${shiftId}`, { method: 'PATCH', headers: HEADERS, body: JSON.stringify(shiftPayload) });
                 await fetch(`${SUPABASE_URL}workers_registry?email=eq.${encodeURIComponent(currentActiveUser.email)}`, { method: 'PATCH', headers: HEADERS, body: JSON.stringify({ morning_advance: remainingCarryforwardBalance }) });
-                
-                if (selfieUrl) {
-                    let record = JSON.parse(localStorage.getItem(`selfies_${runningActiveShift.id}`)) || { in: null, out: null };
-                    record.out = selfieUrl;
-                    localStorage.setItem(`selfies_${runningActiveShift.id}`, JSON.stringify(record));
-                }
 
                 alert("Shift punch-out submitted successfully.");
-                
-                document.getElementById('shift-location').value = '';
-                document.getElementById('shift-progress').value = '';
-                document.getElementById('exp-transport').value = '0';
-                document.getElementById('exp-food').value = '0';
-                document.getElementById('exp-material').value = '0';
-                document.getElementById('exp-advance').value = '0'; 
-                document.getElementById('exp-material-desc').value = '';
-                
-                capturedBillImages = { transport: [], food: [], material: [] };
-                resetBillsVerificationState();
-                updateRequiredBillsUI();
-
                 temporaryCapturedBase64 = null;
                 await syncDashboardPortalState();
             } catch(err) { 
-                console.error("Punch-Out Error:", err);
-                alert("Network error processing punch-out logs: " + err.message); 
+                await savePunchToOfflineQueue('out', shiftPayload, temporaryCapturedBase64);
+                alert("Network Timeout: Punch-Out saved to offline phone storage.");
+                temporaryCapturedBase64 = null;
             }
         }
-        // ---------------------------------------------
         
         document.getElementById('dashboard-month-filter').addEventListener('change', function() {
             sessionStorage.setItem('manualMonthSet', 'true');
