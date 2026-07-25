@@ -1083,11 +1083,13 @@
                 }
             }
 
-            document.getElementById('btn-capture-photo').onclick = async () => {
+            document.getElementById('btn-capture-photo').onclick = () => {
                 capturePhotoSnapshotData();
-                closeCameraModal();
-                if(currentCameraMode === 'in') await executePunchInWorkflow();
-                else if(currentCameraMode === 'out') await executePunchOutWorkflow();
+                closeCameraModal(); // Closes the camera instantly
+                
+                // Execute workflows in the background (Notice: no 'await' here)
+                if(currentCameraMode === 'in') executePunchInWorkflow();
+                else if(currentCameraMode === 'out') executePunchOutWorkflow();
                 else handleBillPhotoCaptured(currentCameraMode);
             };
         }
@@ -1110,6 +1112,17 @@
 
         // --- NETWORK-RESILIENT PUNCH-IN WORKFLOW ---
         async function executePunchInWorkflow() {
+            // 1. OPTIMISTIC UI: Instantly update screen BEFORE waiting for GPS/Network
+            document.getElementById('punch-in-panel').classList.add('hidden');
+            document.getElementById('punch-out-panel').classList.remove('hidden');
+            document.getElementById('punch-in-time-display').innerText = "Started: Right Now (Saving...)";
+            
+            if(temporaryCapturedBase64) {
+                document.getElementById('active-selfie-box').classList.remove('hidden');
+                document.getElementById('active-selfie-image').src = temporaryCapturedBase64;
+            }
+
+            // 2. NOW process the slow tasks in the background
             const gpsCoords = await fetchCurrentGPSLocation();
             const payload = { 
                 worker_email: currentActiveUser.email, 
@@ -1124,43 +1137,40 @@
             // Offline Fallback
             if (!navigator.onLine) {
                 await savePunchToOfflineQueue('in', payload, temporaryCapturedBase64);
-                alert("📶 Device Offline: Shift Punch-In saved locally to phone! It will auto-sync once internet returns.");
-                temporaryCapturedBase64 = null;
                 updateNetworkBadge(false);
-                return;
-            }
+            } else {
+                try {
+                    let selfieUrl = null;
+                    if (temporaryCapturedBase64) {
+                        const fileName = `in_${currentActiveUser.id || 'usr'}_${Date.now()}.jpg`;
+                        selfieUrl = await uploadSelfieToSupabase(temporaryCapturedBase64, fileName);
+                    }
+                    payload.punch_in_image_url = selfieUrl;
 
-            // Online Processing
-            try {
-                let selfieUrl = null;
-                if (temporaryCapturedBase64) {
-                    const fileName = `in_${currentActiveUser.id || 'usr'}_${Date.now()}.jpg`;
-                    selfieUrl = await uploadSelfieToSupabase(temporaryCapturedBase64, fileName);
+                    await fetch(`${SUPABASE_URL}shift_logs`, { method: 'POST', headers: HEADERS, body: JSON.stringify(payload) });
+                } catch(err) { 
+                    await savePunchToOfflineQueue('in', payload, temporaryCapturedBase64);
                 }
-                payload.punch_in_image_url = selfieUrl;
-
-                await fetch(`${SUPABASE_URL}shift_logs`, { method: 'POST', headers: HEADERS, body: JSON.stringify(payload) });
-                alert("Shift started! GPS & Selfie saved to cloud.");
-                temporaryCapturedBase64 = null;
-                await syncDashboardPortalState();
-            } catch(err) { 
-                await savePunchToOfflineQueue('in', payload, temporaryCapturedBase64);
-                alert("Network Timeout: Punch-In queued locally.");
-                temporaryCapturedBase64 = null;
             }
+
+            temporaryCapturedBase64 = null;
+            syncDashboardPortalState(); // Silently syncs dashboard data in the background
         }
 
         // --- NETWORK-RESILIENT PUNCH-OUT WORKFLOW ---
         async function executePunchOutWorkflow() {
             if (!runningActiveShift) return;
 
+            // 1. OPTIMISTIC UI: Instantly give button feedback
+            const punchOutBtn = document.getElementById('punch-out-button');
+            punchOutBtn.innerText = "Ending Shift...";
+            punchOutBtn.disabled = true;
+
+            // Extract values instantly
             const transport_expense = parseFloat(document.getElementById('exp-transport').value) || 0;
             const food_expense = parseFloat(document.getElementById('exp-food').value) || 0;
             const material_expense = parseFloat(document.getElementById('exp-material').value) || 0;
             let manualLocation = document.getElementById('shift-location').value.trim();
-            const gpsCoords = await fetchCurrentGPSLocation();
-            
-            const site_location = manualLocation ? `${manualLocation} (${gpsCoords})` : gpsCoords;
             const progress_notes = document.getElementById('shift-progress').value.trim();
             const payment_advance_taken = parseFloat(document.getElementById('exp-advance').value) || 0; 
             const material_notes = document.getElementById('exp-material-desc').value.trim();
@@ -1168,6 +1178,10 @@
             const currentWallet = parseFloat(currentActiveUser.morning_advance || 0);
             const remainingCarryforwardBalance = currentWallet + payment_advance_taken - totalShiftExpenses;
 
+            // 2. Fetch GPS (Slow)
+            const gpsCoords = await fetchCurrentGPSLocation();
+            const site_location = manualLocation ? `${manualLocation} (${gpsCoords})` : gpsCoords;
+            
             const shiftPayload = { 
                 shift_id: runningActiveShift.id,
                 site_location, progress_notes, transport_expense, food_expense, material_expense, material_notes, 
@@ -1178,36 +1192,35 @@
             // Offline Fallback
             if (!navigator.onLine) {
                 await savePunchToOfflineQueue('out', shiftPayload, temporaryCapturedBase64);
-                alert("📶 Device Offline: Shift Punch-Out queued locally! Will sync automatically when network returns.");
-                temporaryCapturedBase64 = null;
                 updateNetworkBadge(false);
-                return;
-            }
+            } else {
+                try {
+                    let selfieUrl = null;
+                    if (temporaryCapturedBase64) {
+                        const fileName = `out_${currentActiveUser.id || 'usr'}_${Date.now()}.jpg`;
+                        selfieUrl = await uploadSelfieToSupabase(temporaryCapturedBase64, fileName);
+                    }
+                    shiftPayload.punch_out_image_url = selfieUrl;
 
-            // Online Processing
-            try {
-                let selfieUrl = null;
-                if (temporaryCapturedBase64) {
-                    const fileName = `out_${currentActiveUser.id || 'usr'}_${Date.now()}.jpg`;
-                    selfieUrl = await uploadSelfieToSupabase(temporaryCapturedBase64, fileName);
+                    const shiftId = shiftPayload.shift_id;
+                    delete shiftPayload.shift_id;
+                    delete shiftPayload.remaining_balance;
+
+                    await fetch(`${SUPABASE_URL}shift_logs?id=eq.${shiftId}`, { method: 'PATCH', headers: HEADERS, body: JSON.stringify(shiftPayload) });
+                    await fetch(`${SUPABASE_URL}workers_registry?email=eq.${encodeURIComponent(currentActiveUser.email)}`, { method: 'PATCH', headers: HEADERS, body: JSON.stringify({ morning_advance: remainingCarryforwardBalance }) });
+                    
+                } catch(err) { 
+                    await savePunchToOfflineQueue('out', shiftPayload, temporaryCapturedBase64);
                 }
-                shiftPayload.punch_out_image_url = selfieUrl;
-
-                const shiftId = shiftPayload.shift_id;
-                delete shiftPayload.shift_id;
-                delete shiftPayload.remaining_balance;
-
-                await fetch(`${SUPABASE_URL}shift_logs?id=eq.${shiftId}`, { method: 'PATCH', headers: HEADERS, body: JSON.stringify(shiftPayload) });
-                await fetch(`${SUPABASE_URL}workers_registry?email=eq.${encodeURIComponent(currentActiveUser.email)}`, { method: 'PATCH', headers: HEADERS, body: JSON.stringify({ morning_advance: remainingCarryforwardBalance }) });
-
-                alert("Shift punch-out submitted successfully.");
-                temporaryCapturedBase64 = null;
-                await syncDashboardPortalState();
-            } catch(err) { 
-                await savePunchToOfflineQueue('out', shiftPayload, temporaryCapturedBase64);
-                alert("Network Timeout: Punch-Out saved to offline phone storage.");
-                temporaryCapturedBase64 = null;
             }
+            
+            temporaryCapturedBase64 = null;
+            
+            // 3. Swap UI back to default state
+            document.getElementById('punch-out-panel').classList.add('hidden');
+            document.getElementById('punch-in-panel').classList.remove('hidden');
+            
+            syncDashboardPortalState(); // Pull fresh data
         }
         
         document.getElementById('dashboard-month-filter').addEventListener('change', function() {
